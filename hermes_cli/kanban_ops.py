@@ -57,6 +57,26 @@ def _cmd_tail(args: argparse.Namespace) -> int:
     return _poll_loop(args.interval, tick)
 
 
+def _nonspawnable_why(assignee: str) -> tuple[str, str]:
+    """``(code, hint)`` for an assignee this home will not start; only a lane run elsewhere is steady state."""
+    from hermes_cli.profiles import get_profile_dir, normalize_profile_name, profile_exists
+    from hermes_cli.profiles_run_elsewhere import home_runs_elsewhere
+    try:
+        canon = normalize_profile_name(assignee)
+    except ValueError:
+        canon = None
+    if canon is None or not profile_exists(assignee):
+        return ("no_profile", f"no profile {assignee!r} here: create it or reassign "
+                "(fine if an external worker claims it through the API)")
+    if home_runs_elsewhere(get_profile_dir(assignee)):
+        return "runs_elsewhere", f"{assignee!r} runs on another host through a plugin lane (OK)"
+    allow = kbd._dispatch_profile_allowlist(normalize_profile_name)
+    if allow is not None and canon not in allow:
+        return ("not_in_dispatch_profiles",
+                f"{assignee!r} is not in kanban.dispatch_profiles: add it so this home claims its cards")
+    return "unknown", f"{assignee!r} is not spawnable here"
+
+
 def _cmd_dispatch(args: argparse.Namespace) -> int:
     # Honour kanban.default_assignee, kanban.max_in_progress,
     # kanban.max_in_progress_per_profile and kanban.max_spawn with the same
@@ -91,6 +111,11 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
         )
+        ids = res.skipped_nonspawnable
+        owners = dict(conn.execute(
+            f"SELECT id, assignee FROM tasks WHERE id IN ({','.join('?' * len(ids))})", ids,
+        ).fetchall()) if ids else {}
+    why = {tid: _nonspawnable_why(owners.get(tid) or "") for tid in res.skipped_nonspawnable}
     if getattr(args, "json", False):
         _print_json({
             **{k: getattr(res, k)
@@ -101,6 +126,7 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             ],
             "skipped_unassigned": res.skipped_unassigned,
             "skipped_nonspawnable": res.skipped_nonspawnable,
+            "skipped_nonspawnable_reasons": {tid: code for tid, (code, _) in why.items()},
             "skipped_per_profile_capped": [
                 {"task_id": tid, "assignee": who, "current": current}
                 for (tid, who, current) in res.skipped_per_profile_capped
@@ -141,11 +167,8 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         print(f"Skipped (unassigned): {', '.join(res.skipped_unassigned)}")
     for tid, who, current in res.skipped_per_profile_capped:
         print(f"Deferred ({who} at per-profile cap, {current} running): {tid}")
-    if res.skipped_nonspawnable:
-        print(
-            f"Skipped (non-spawnable assignee — terminal lane, OK): "
-            f"{', '.join(res.skipped_nonspawnable)}"
-        )
+    for tid, (_, hint) in why.items():
+        print(f"Skipped (not spawnable here) {tid}: {hint}")
     for tid, reason in res.respawn_guarded:
         print(f"Guarded ({reason}): {tid}")
     if res.rate_limited:
