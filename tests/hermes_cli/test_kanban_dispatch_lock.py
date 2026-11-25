@@ -117,3 +117,36 @@ def test_paused_cli_dispatch_says_why(conn, kanban_home, capsys):
     args.json = False
     kanban_ops._cmd_dispatch(args)
     assert "emergency stop" in capsys.readouterr().out
+
+
+def test_paused_standalone_daemon_tick_spawns_nothing(conn, kanban_home, monkeypatch):
+    """`hermes kanban daemon` is a separate door from the gateway tick; it must stop too."""
+    import threading
+
+    from agent import estop
+
+    kb.create_task(conn, title="t", assignee="w")
+    spawned = []
+    monkeypatch.setattr(kbd, "_default_spawn", lambda *a, **k: spawned.append(a) or 1, raising=False)
+    estop.engage()
+    stop, ticks = threading.Event(), []
+
+    def on_tick(res):
+        ticks.append(res)
+        stop.set()
+
+    kbd.run_daemon(interval=0.01, stop_event=stop, on_tick=on_tick)
+    assert ticks and ticks[0].paused is True and not ticks[0].spawned
+    assert spawned == []
+
+
+def test_paused_dashboard_dispatch_reports_the_pause(conn, kanban_home):
+    """The dashboard's Dispatch button calls dispatch_once directly and returns its result."""
+    from agent import estop
+    from plugins.kanban.dashboard import plugin_api
+
+    kb.create_task(conn, title="t", assignee="w")
+    estop.engage()
+    body = plugin_api.dispatch(dry_run=True, max_n=8, board=None)
+    assert body["paused"] is True
+    assert not body["spawned"]
