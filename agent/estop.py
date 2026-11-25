@@ -119,8 +119,9 @@ def paused_reply() -> Optional[str]:
     return f"⏸️ Hermes is paused{tag}. New work is on hold; run `hermes resume` to pick things back up."
 
 
-def check_paused(component: str, logger: logging.Logger) -> bool:
+def check_paused(component: str, logger: Optional[logging.Logger] = None) -> bool:
     """Return True when engaged, logging once per engagement per component (re-armed after a resume)."""
+    logger = logger or logging.getLogger(__name__)
     if not is_engaged():
         with _log_lock:
             _logged_components.discard(component)

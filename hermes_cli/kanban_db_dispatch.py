@@ -8,7 +8,6 @@ late-bound via ``_kb`` (import-cycle breaking) so monkeypatching
 from __future__ import annotations
 
 import contextlib
-import logging
 import os
 import re
 import signal
@@ -30,8 +29,6 @@ from typing import TYPE_CHECKING
 from hermes_cli.quiet_single_query import KANBAN_WORKER_EXIT_TRAILER
 from hermes_cli._startup_fast import project_root_str
 from hermes_cli.kanban_worker_log import open_task_worker_log as _open_worker_log
-
-logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from hermes_cli.kanban_db import Task
@@ -92,18 +89,7 @@ _RESPAWN_GUARD_PR_URL_RE = re.compile(
 
 @dataclass
 class DispatchResult:
-    """Outcome of a single ``dispatch`` pass.
-
-    ``kanban.default_assignee`` applied this tick before spawning (#27145). Surfaces the auto-assignment to
-    telemetry / CLI / dashboard so the operator can see when the dispatcher is acting on the fallback rule
-    ``kanban.max_in_progress_per_profile`` (#21582). Each entry is ``(task_id, assignee,
-    current_running_count)``. NOT an operator-actionable failure — the task will be picked up on a
-    subsequent tick when the assignee has capacity. Separate bucket so telemetry / dashboards can show "this
-    profile is busy" vs
-    the board's dispatch lock (issue #35240). A losing dispatcher does no DB writes this tick — the lock
-    holder is making progress on the same board. This is the steady-state signal that a single-writer guard
-    is
-    """
+    """Outcome of a single ``dispatch`` pass; each field's docstring says what it counts."""
 
     reclaimed: int = 0
     promoted: int = 0
@@ -151,8 +137,7 @@ class DispatchResult:
     """True when another process held the board's dispatch lock: this tick did
     no DB writes; the lock holder is making progress on the same board."""
     paused: bool = False
-    """True when the global emergency stop (``hermes pause``) declined this
-    tick: nothing was reclaimed, promoted or spawned (dry runs included)."""
+    """``hermes pause`` declined this tick: nothing reclaimed, promoted or spawned (dry runs too)."""
     memory_pressure: Optional[str] = None
     """Memory pressure that restricted this tick: ``"critical"`` (no new
     workers), ``"elevated"`` (at most one), ``None`` (no restriction).
@@ -2005,21 +1990,15 @@ def dispatch_once(
     so two dispatchers on one ``kanban.db`` never race a write tick on WAL
     frames. The loser returns an empty ``DispatchResult`` with
     ``skipped_locked=True`` and writes nothing; the lock is keyed on the
-    resolved DB path so unrelated boards tick in parallel.
-
-    While ``hermes pause`` is engaged the tick is declined up front with
-    ``paused=True`` — this is the chokepoint every dispatch door shares, so
-    none has to remember the check.
+    resolved DB path so unrelated boards tick in parallel. ``hermes pause`` declines the tick
+    here (``paused=True``): every dispatch door shares this chokepoint.
     """
-    try:
+    try:  # an unimportable estop fails OPEN; an unreadable sentinel fails SAFE in is_engaged()
         from agent.estop import check_paused
     except ImportError:
-        # Unimportable estop fails OPEN (a packaging fault must not wedge the
-        # board); an unreadable sentinel fails SAFE inside is_engaged().
-        pass
-    else:
-        if check_paused("kanban.dispatch_once", logger):
-            return DispatchResult(paused=True)
+        check_paused = None
+    if check_paused is not None and check_paused("kanban.dispatch_once"):
+        return DispatchResult(paused=True)
 
     def _locked_tick() -> DispatchResult:
         return _dispatch_once_locked(
